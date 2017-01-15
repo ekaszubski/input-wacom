@@ -3830,6 +3830,9 @@ static const struct wacom_features wacom_features_0x343 =
 	  DTUS, WACOM_INTUOS_RES, WACOM_INTUOS_RES, 4,
 	  WACOM_DTU_OFFSET, WACOM_DTU_OFFSET,
 	  WACOM_DTU_OFFSET, WACOM_DTU_OFFSET };
+static const struct wacom_features wacom_features_0x357 =
+	{ "Wacom Intuos Pro 2 M Paper", 44800, 29600, 8191, 63,
+	  HID_GENERIC, WACOM_INTUOS3_RES, WACOM_INTUOS3_RES, 8 };
 
 static const struct wacom_features wacom_features_HID_ANY_ID =
 	{ "Wacom HID", .type = HID_GENERIC, .oVid = HID_ANY_ID, .oPid = HID_ANY_ID };
@@ -4000,6 +4003,7 @@ const struct hid_device_id wacom_ids[] = {
 	{ USB_DEVICE_WACOM(0x4004) },
 	{ USB_DEVICE_WACOM(0x5000) },
 	{ USB_DEVICE_WACOM(0x5002) },
+	{ USB_DEVICE_WACOM(0x357) },
 	{ USB_DEVICE_LENOVO(0x6004) },
 
 	{ USB_DEVICE_WACOM(HID_ANY_ID) },
