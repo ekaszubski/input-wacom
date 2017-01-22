@@ -34,6 +34,9 @@ static int wacom_get_report(struct hid_device *hdev, u8 type, u8 *buf,
 			    size_t size, unsigned int retries)
 {
 	int retval;
+    char * buf_hex = NULL;
+    size_t const buf_hex_len = 2 + 2*size*sizeof(u8) + 1;
+    size_t i;
 
 	do {
 		retval = hid_hw_raw_request(hdev, buf[0], buf, size, type,
@@ -44,6 +47,16 @@ static int wacom_get_report(struct hid_device *hdev, u8 type, u8 *buf,
 		hid_err(hdev, "wacom_get_report: ran out of retries "
 			"(last error = %d)\n", retval);
 
+    buf_hex = kmalloc(buf_hex_len, GFP_KERNEL);
+    buf_hex[0] = '0';
+    buf_hex[1] = 'x';
+    for(i = 0; i < size; ++i)
+    {
+        snprintf(&buf_hex[2+2*i], 3, "%02x", (int)buf[i]);
+    }
+    printk(KERN_INFO" ""wacom_get_report: type %#04x | size %lu | id %i | buf %s\n", type, size, buf[0], buf_hex);
+    kfree(buf_hex);
+
 	return retval;
 }
 
@@ -51,6 +64,19 @@ static int wacom_set_report(struct hid_device *hdev, u8 type, u8 *buf,
 			    size_t size, unsigned int retries)
 {
 	int retval;
+    char * buf_hex = NULL;
+    size_t const buf_hex_len = 2 + 2*size*sizeof(u8) + 1;
+    size_t i;
+
+    buf_hex = kmalloc(buf_hex_len, GFP_KERNEL);
+    buf_hex[0] = '0';
+    buf_hex[1] = 'x';
+    for(i = 0; i < size; ++i)
+    {
+        snprintf(&buf_hex[2+2*i], 3, "%02x", (int)buf[i]);
+    }
+    printk(KERN_INFO" ""wacom_set_report: type %#04x | size %lu | id %i | buf %s\n", type, size, buf[0], buf_hex);
+    kfree(buf_hex);
 
 	do {
 		retval = hid_hw_raw_request(hdev, buf[0], buf, size, type,
@@ -124,8 +150,11 @@ static void wacom_feature_mapping(struct hid_device *hdev,
 	int ret;
 	int n;
 
+//    printk(KERN_INFO" ""wacom_feature_mapping: hid %#04x\n", usage->hid);
 	switch (usage->hid) {
+    case WACOM_HID_DG_CONTACTMAX:
 	case HID_DG_CONTACTMAX:
+        printk(KERN_INFO" ""wacom_feature_mapping: found *HID_DG_CONTACTMAX\n");
 		/* leave touch_max as is if predefined */
 		if (!features->touch_max) {
 			/* read manually */
@@ -144,10 +173,12 @@ static void wacom_feature_mapping(struct hid_device *hdev,
 					 "defaulting to %d\n",
 					  features->touch_max);
 			}
+        printk(KERN_INFO" ""wacom_feature_mapping: set touch_max to %i\n", features->touch_max);
 			kfree(data);
 		}
 		break;
 	case HID_DG_INPUTMODE:
+        printk(KERN_INFO" ""wacom_feature_mapping: found HID_DG_INPUTMODE\n");
 		/* Ignore if value index is out of bounds. */
 		if (usage->usage_index >= field->report_count) {
 			dev_err(&hdev->dev, "HID_DG_INPUTMODE out of range\n");
@@ -159,6 +190,7 @@ static void wacom_feature_mapping(struct hid_device *hdev,
 		break;
 
 	case HID_UP_DIGITIZER:
+        printk(KERN_INFO" ""wacom_feature_mapping: found HID_UP_DIGITIZER\n");
 		if (field->report->id == 0x0B &&
 		    (field->application == WACOM_HID_G9_PEN ||
 		     field->application == WACOM_HID_G11_PEN)) {
@@ -168,12 +200,14 @@ static void wacom_feature_mapping(struct hid_device *hdev,
 		break;
 
 	case WACOM_HID_WD_DATAMODE:
+        printk(KERN_INFO" ""wacom_feature_mapping: found WACOM_HID_WD_DATAMODE\n");
 		wacom->wacom_wac.mode_report = field->report->id;
 		wacom->wacom_wac.mode_value = 2;
 		break;
 
 	case WACOM_HID_UP_G9:
 	case WACOM_HID_UP_G11:
+        printk(KERN_INFO" ""wacom_feature_mapping: found WACOM_HID_UP_G*\n");
 		if (field->report->id == 0x03 &&
 		    (field->application == WACOM_HID_G9_TOUCHSCREEN ||
 		     field->application == WACOM_HID_G11_TOUCHSCREEN)) {
@@ -185,6 +219,7 @@ static void wacom_feature_mapping(struct hid_device *hdev,
 	case WACOM_HID_WD_OFFSETTOP:
 	case WACOM_HID_WD_OFFSETRIGHT:
 	case WACOM_HID_WD_OFFSETBOTTOM:
+        printk(KERN_INFO" ""wacom_feature_mapping: found WACOM_HID_WD_OFFSET*\n");
 		/* read manually */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,19,0)
 		n = wacom_hid_report_len(field->report);
@@ -255,11 +290,16 @@ static void wacom_usage_mapping(struct hid_device *hdev,
 	* values commonly reported.
 	*/
 	if (pen)
+    {
+//        printk(KERN_INFO" ""wacom_usage_mapping: found pen\n");
 		features->device_type |= WACOM_DEVICETYPE_PEN;
+    }
 	else if (finger)
+    {
+//        printk(KERN_INFO" ""wacom_usage_mapping: found finger\n");
 		features->device_type |= WACOM_DEVICETYPE_TOUCH;
-	else
-		return;
+    }
+	else return;
 
 	/*
 	 * Bamboo models do not support HID_DG_CONTACTMAX.
@@ -285,6 +325,8 @@ static void wacom_usage_mapping(struct hid_device *hdev,
 	    field->physical == HID_DG_STYLUS) {
 		int i = usage->usage_index;
 
+        printk(KERN_INFO" ""wacom_usage_mapping: HID_DG_BARRELSWITCH2 patch\n");
+
 		if (i-4 >= 0 && i+1 < field->maxusage &&
 		    field->usage[i-4].hid == HID_DG_TIPSWITCH &&
 		    field->usage[i-3].hid == HID_DG_BARRELSWITCH &&
@@ -297,6 +339,7 @@ static void wacom_usage_mapping(struct hid_device *hdev,
 
 	switch (usage->hid) {
 	case HID_GD_X:
+        printk(KERN_INFO" ""wacom_usage_mapping: found HID_GD_X\n");
 		features->x_max = field->logical_maximum;
 		if (finger) {
 			features->x_phy = field->physical_maximum;
@@ -308,6 +351,7 @@ static void wacom_usage_mapping(struct hid_device *hdev,
 		}
 		break;
 	case HID_GD_Y:
+        printk(KERN_INFO" ""wacom_usage_mapping: found HID_GD_Y\n");
 		features->y_max = field->logical_maximum;
 		if (finger) {
 			features->y_phy = field->physical_maximum;
@@ -319,6 +363,7 @@ static void wacom_usage_mapping(struct hid_device *hdev,
 		}
 		break;
 	case HID_DG_TIPPRESSURE:
+        printk(KERN_INFO" ""wacom_usage_mapping: found HID_GD_TIPPRESSURE\n");
 		if (pen)
 			features->pressure_max = field->logical_maximum;
 		break;
@@ -337,6 +382,7 @@ static void wacom_post_parse_hid(struct hid_device *hdev,
 	if (features->type == HID_GENERIC) {
 		/* Any last-minute generic device setup */
 		if (features->touch_max > 1) {
+            printk(KERN_INFO" ""wacom_post_parse_hid: input_mt_init_slots (%i)\n", features->touch_max);
 			input_mt_init_slots(wacom_wac->touch_input, wacom_wac->features.touch_max,
 				    INPUT_MT_DIRECT);
 		}
@@ -353,29 +399,41 @@ static void wacom_parse_hid(struct hid_device *hdev,
 	/* check features first */
 	rep_enum = &hdev->report_enum[HID_FEATURE_REPORT];
 	list_for_each_entry(hreport, &rep_enum->report_list, list) {
+        printk(KERN_INFO" ""wacom_parse_hid: feature mapping: checking report id %i size %i\n", hreport->id, hreport->maxfield);
 		for (i = 0; i < hreport->maxfield; i++) {
 			/* Ignore if report count is out of bounds. */
 			if (hreport->field[i]->report_count < 1)
+            {
+                printk(KERN_INFO" ""wacom_parse_hid: feature mapping skip field %i\n", i);
 				continue;
+            }
 
 			for (j = 0; j < hreport->field[i]->maxusage; j++) {
+//                printk(KERN_INFO" ""wacom_parse_hid: feature mapping %i:%i\n", i, j);
 				wacom_feature_mapping(hdev, hreport->field[i],
 						hreport->field[i]->usage + j);
 			}
 		}
+//        printk(KERN_INFO" ""wacom_parse_hid: ----\n", i);
 	}
 
 	/* now check the input usages */
 	rep_enum = &hdev->report_enum[HID_INPUT_REPORT];
 	list_for_each_entry(hreport, &rep_enum->report_list, list) {
-
+        printk(KERN_INFO" ""wacom_parse_hid: usage mapping: checking report id %i size %i\n", hreport->id, hreport->maxfield);
 		if (!hreport->maxfield)
 			continue;
 
 		for (i = 0; i < hreport->maxfield; i++)
+        {
 			for (j = 0; j < hreport->field[i]->maxusage; j++)
+            {
+//                printk(KERN_INFO" ""wacom_parse_hid: usage mapping %i:%i\n", i, j);
 				wacom_usage_mapping(hdev, hreport->field[i],
 						hreport->field[i]->usage + j);
+            }
+        }
+//        printk(KERN_INFO" ""wacom_parse_hid: ----\n", i);
 	}
 
 	wacom_post_parse_hid(hdev, features);
@@ -396,6 +454,7 @@ static int wacom_hid_set_device_mode(struct hid_device *hdev)
 	if (r) {
 		r->field[0]->value[hid_data->inputmode_index] = 2;
 		hid_hw_request(hdev, r, HID_REQ_SET_REPORT);
+        printk(KERN_INFO" ""wacom_hid_set_device_mode: hid_hw_request field[0]->value[%i] = 2\n", hid_data->inputmode_index);
 	}
 	return 0;
 }
@@ -516,6 +575,7 @@ static int wacom_query_tablet_data(struct hid_device *hdev,
 
 	if (features->type != HID_GENERIC) {
 		if (features->device_type & WACOM_DEVICETYPE_TOUCH) {
+            printk(KERN_INFO" ""wacom_query_tablet_data: touch device\n");
 			if (features->type > TABLETPC) {
 				/* MT Tablet PC touch */
 				wacom_wac->mode_report = 3;
@@ -531,17 +591,30 @@ static int wacom_query_tablet_data(struct hid_device *hdev,
 				wacom_wac->mode_value = 2;
 			}
 		} else if (features->device_type & WACOM_DEVICETYPE_PEN) {
+            printk(KERN_INFO" ""wacom_query_tablet_data: pen device\n");
 			if (features->type <= BAMBOO_PT) {
 				wacom_wac->mode_report = 2;
 				wacom_wac->mode_value = 2;
 			}
 		}
 	}
+//    else
+//    {
+//        if(features->pktlen == WACOM_PKGLEN_INTUOSP2_HID)
+//        {
+//            printk(KERN_INFO" ""wacom_query_tablet_data: INTUOSP2MP\n");
+//            wacom_wac->mode_report = 52;
+//            wacom_wac->mode_value = 3;
+//        }
+//    }
 
 	wacom_set_device_mode(hdev, wacom_wac);
 
 	if (features->type == HID_GENERIC)
+    {
+        printk(KERN_INFO" ""wacom_query_tablet_data: HID device\n");
 		return wacom_hid_set_device_mode(hdev);
+    }
 
 	return 0;
 }
@@ -783,6 +856,8 @@ static int wacom_led_control(struct wacom *wacom)
 		int crop_lum = 0;
 		unsigned char led_bits = (crop_lum << 4) | (ring_lum << 2) | (ring_led);
 
+        printk(KERN_INFO" ""wacom_led_control: configuring LEDs for INTUOS5S <= type <= INTUOSPL\n");
+
 		buf[0] = report_id;
 		if (wacom->wacom_wac.pid) {
 			wacom_get_report(wacom->hdev, HID_FEATURE_REPORT,
@@ -794,6 +869,8 @@ static int wacom_led_control(struct wacom *wacom)
 	}
 	else {
 		int led = wacom->led.groups[0].select | 0x4;
+
+        printk(KERN_INFO" ""wacom_led_control: configuring LEDs\n");
 
 		if (wacom->wacom_wac.features.type == WACOM_21UX2 ||
 		    wacom->wacom_wac.features.type == WACOM_24HD)
@@ -1125,7 +1202,10 @@ static int wacom_initialize_leds(struct wacom *wacom)
 	int error;
 
 	if (!(wacom->wacom_wac.features.device_type & WACOM_DEVICETYPE_PAD))
+    {
+        printk(KERN_INFO" ""wacom_initialize_leds: device is not a pad, ignoring\n");
 		return 0;
+    }
 
 	/* Initialize default values */
 	switch (wacom->wacom_wac.features.type) {
@@ -1195,7 +1275,28 @@ static int wacom_initialize_leds(struct wacom *wacom)
 		}
 		return 0;
 
+    case HID_GENERIC:
+        if(!(wacom->wacom_wac.features.pktlen == WACOM_PKGLEN_INTUOSP2_HID)) break;
+
+        printk(KERN_INFO" ""wacom_initialize_leds: quirk for HID_GENERIC -> INTUOSP2\n");
+
+//		wacom->led.llv = 32;
+//		wacom->led.hlv = 3;
+//		wacom->led.img_lum = 0;
+//
+//		error = wacom_led_groups_allocate(wacom, 1);
+//		if (error) {
+//			hid_err(wacom->hdev,
+//				"cannot create leds err: %d\n", error);
+//			return error;
+//		}
+//
+//		error = wacom_devm_sysfs_create_group(wacom,
+//						      &intuos5_led_attr_group);
+		break;
+
 	default:
+        printk(KERN_INFO" ""wacom_initialize_leds: unknown type %#02x, ignoring\n", wacom->wacom_wac.features.type);
 		return 0;
 	}
 
@@ -1621,6 +1722,8 @@ static struct input_dev *wacom_allocate_input(struct wacom *wacom)
 	input_dev->id.version = hdev->version;
 	input_set_drvdata(input_dev, wacom);
 
+    printk(KERN_INFO" ""wacom_allocate_input: allocated dev %s\n", input_dev->name);
+
 	return input_dev;
 }
 
@@ -1666,6 +1769,7 @@ static int wacom_register_inputs(struct wacom *wacom)
 		error = input_register_device(pen_input_dev);
 		if (error)
 			goto fail;
+        printk(KERN_INFO" ""wacom_register_inputs: registered pen input capability\n");
 	}
 
 	error = wacom_setup_touch_input_capabilities(touch_input_dev, wacom_wac);
@@ -1678,6 +1782,7 @@ static int wacom_register_inputs(struct wacom *wacom)
 		error = input_register_device(touch_input_dev);
 		if (error)
 			goto fail;
+        printk(KERN_INFO" ""wacom_register_inputs: registered touch input capability\n");
 	}
 
 	error = wacom_setup_pad_input_capabilities(pad_input_dev, wacom_wac);
@@ -1690,6 +1795,7 @@ static int wacom_register_inputs(struct wacom *wacom)
 		error = input_register_device(pad_input_dev);
 		if (error)
 			goto fail;
+        printk(KERN_INFO" ""wacom_register_inputs: registered pad input capability\n");
 	}
 
 	return 0;
@@ -1853,6 +1959,7 @@ static int wacom_parse_and_register(struct wacom *wacom, bool wireless)
 	unsigned int connect_mask = HID_CONNECT_HIDRAW;
 
 	features->pktlen = wacom_compute_pktlen(hdev);
+    printk(KERN_INFO" ""wacom_parse_and_register: pktlen %i\n", features->pktlen);
 	if (features->pktlen > WACOM_PKGLEN_MAX)
 		return -EINVAL;
 
@@ -1883,6 +1990,22 @@ static int wacom_parse_and_register(struct wacom *wacom, bool wireless)
 			goto fail_shared_data;
 		}
 	}
+
+    if(features->type == INTUOSP2MP)
+    {
+        if(features->pktlen == WACOM_PKGLEN_INTUOSP2_HID)
+        {
+            printk(KERN_INFO" ""wacom_parse_and_register: setting INTUOSP2MP primary interface to HID_GENERIC\n");
+            features->type = HID_GENERIC;
+        }
+        else if(features->pktlen == WACOM_PKGLEN_INTUOSP2_DBG)
+        {
+            printk(KERN_INFO" ""wacom_parse_and_register: setting INTUOSP2MP secondary interface to INTUOS\n");
+            //features->type = INTUOSPM;
+            //features->device_type = WACOM_DEVICETYPE_TOUCH;
+            //features->touch_max = 16;
+        }
+    }
 
 	/* set the default size in case we do not get them from hid */
 	wacom_set_default_phy(features);
@@ -1929,10 +2052,12 @@ static int wacom_parse_and_register(struct wacom *wacom, bool wireless)
 		error = wacom_initialize_leds(wacom);
 		if (error)
 			goto fail_leds;
+        printk(KERN_INFO" ""wacom_parse_and_register: initialized LEDs\n");
 
 		error = wacom_initialize_remotes(wacom);
 		if (error)
 			goto fail_remote;
+        printk(KERN_INFO" ""wacom_parse_and_register: initialized remotes\n");
 	}
 
 	if (features->type == HID_GENERIC)
