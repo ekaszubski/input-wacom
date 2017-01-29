@@ -1582,6 +1582,8 @@ static void wacom_wac_pad_usage_mapping(struct hid_device *hdev,
 
 	switch (equivalent_usage & 0xfffffff0) {
 	case WACOM_HID_WD_EXPRESSKEY00:
+	case WACOM_HID_WD_EXPRESSKEYCAP00:
+	case WACOM_HID_WD_EXPRESSKEYCAP01:
 		wacom_map_usage(input, usage, field, EV_KEY,
 				wacom_numbered_button_to_key(features->numbered_buttons),
 				0);
@@ -2309,6 +2311,110 @@ static int wacom_bpt3_touch(struct wacom_wac *wacom)
 	return 1;
 }
 
+/*
+ * Intuos Pro 2 touch message
+ * 8 bytes: [touch id|touch state|x low|x high|y low|y high|width|height]
+ * touch id:    <uchar>  range 0-10 (0 is no touch, 1 is first touch, 10 is 10th touch)
+ * touch state: <bool>   range 0-1
+ * x:           <short>  data[3] is high byte, data[2] is low byte
+ * y:           <short>  data[5] is high byte, data[4] is low byte
+ * width:       <uchar>
+ * height:      <uchar>
+ */
+static void wacom_ip2_touch_msg(struct wacom_wac *wacom, unsigned char *data)
+{
+	struct input_dev *input = wacom->touch_input;
+	/* touch id is the 0th byte */
+	int slot = input_mt_get_slot_by_key(input, data[0]);
+	/* touch state is the 1st byte, lowest bit */
+	bool touch = data[1] & 0x01;
+
+	if (slot < 0)
+		return;
+
+	touch = touch && report_touch_events(wacom);
+
+	input_mt_slot(input, slot);
+	input_mt_report_slot_state(input, MT_TOOL_FINGER, touch);
+
+	if (touch) {
+		/* x is bytes 3 and 2 */
+		int x = ((short)data[3] << 8) | data[2];
+		/* y is bytes 5 and 4 */
+		int y = ((short)data[5] << 8) | data[4];
+
+		/*
+		 * Bytes 6 and 7 are width and height of the touch bounding box.
+		 * We need to report in touch space units; width and height are
+		 * approximately 1/100 the scale of the touch space.
+		 */
+		int const major = max(data[6], data[7]) * 100;
+		int const minor = min(data[6], data[7]) * 100;
+		/* if width > height, we need to indicate a 90-degree rotation */
+		bool const orientation = data[6] > data[7];
+
+		input_report_abs(input, ABS_MT_POSITION_X, x);
+		input_report_abs(input, ABS_MT_POSITION_Y, y);
+		input_report_abs(input, ABS_MT_TOUCH_MAJOR, major);
+		input_report_abs(input, ABS_MT_TOUCH_MINOR, minor);
+		input_report_abs(input, ABS_MT_ORIENTATION, orientation);
+	}
+}
+
+/*
+ * Packet is fixed-length, 44 bytes
+ * - First 2 bytes are type and total number of touches
+ * - Next 40 bytes are 5 8-byte touch messages
+ * - Last 2 bytes are monotonically increasing, probably a timestamp
+ * At least 10 touches are supported; when >5 touches are sent, they are
+ * split into multiple packets. The extra packets have the same format as
+ * the primary packet, but the total touches byte is always zero. The extra
+ * packets share the same "timestamp" as the primary packet.
+ */
+static int wacom_ip2_touch(struct wacom_wac *wacom)
+{
+	unsigned char *data = wacom->data;
+	static char count;
+	bool touch_changed = false;
+	unsigned int offset = 0;
+
+	/* Make sure this is actually an IP2 touch packet */
+	if (data[0] != WACOM_REPORT_IP2_TOUCH) return 0;
+
+	/*
+	 * The first packet will always have a non-zero touch count
+	 * since no messages are sent if no touches are detected.
+	 */
+	if(data[1])
+	{
+		/* if we're on the first packet, set the total touches from the low nibble */
+		count = data[1] & 0x0f;
+	}
+
+	/*
+	 * data has up to 5 fixed-sized 8-byte messages starting at data[2].
+	 * Messages are defined if their touch id (first byte) is non-zero.
+	 */
+	for (offset = 2; offset < WACOM_BYTES_PER_IP2_PACKET && data[offset]; offset += 8)
+	{
+		wacom_ip2_touch_msg(wacom, data + offset);
+		touch_changed = true;
+        /* decrement count for each touch received so we know when we processed all of them */
+		--count;
+	}
+
+	/*
+	 * Only update touch if we actually have a touchpad and touch data changed
+	 * and we received all expected touches.
+	 */
+	if (wacom->touch_input && touch_changed && !count) {
+		input_mt_sync_frame(wacom->touch_input);
+		wacom->shared->touch_down = wacom_wac_finger_count_touches(wacom);
+	}
+
+	return 1;
+}
+
 static int wacom_bpt_pen(struct wacom_wac *wacom)
 {
 	struct wacom_features *features = &wacom->features;
@@ -2522,6 +2628,30 @@ static int wacom_wireless_irq(struct wacom_wac *wacom, size_t len)
 	return 0;
 }
 
+/*
+ * The status report comes in every two seconds and is 9 bytes long.
+ * The report appears to convey only battery level and touch switch state.
+ * Layout: [report id|battery level|touch switch|unknown...]
+ * - battery level: <uchar> range 0-100
+ * - touch switch:  <bool>  range 0-1 (highest bit, mask 0x80)
+ */
+static int wacom_status_ip2_irq(struct wacom_wac *wacom_wac, size_t len)
+{
+	unsigned char *data = wacom_wac->data;
+
+	/* Ensure we're actually looking at an IP2 report packet */
+	if(data[0] != WACOM_REPORT_IP2_STATUS) return 0;
+
+	/* battery status is 2nd byte, range 0-100 (0x00 - 0x64) */
+	wacom_notify_battery(wacom_wac, data[2], true, true, true);
+
+	/* touch switch is 3rd byte, highest bit */
+	input_report_switch(wacom_wac->shared->touch_input, SW_MUTE_DEVICE, data[3] & 0x80);
+	input_sync(wacom_wac->shared->touch_input);
+
+	return 0;
+}
+
 static int wacom_status_irq(struct wacom_wac *wacom_wac, size_t len)
 {
 	struct wacom *wacom = container_of(wacom_wac, struct wacom, wacom_wac);
@@ -2629,11 +2759,16 @@ void wacom_wac_irq(struct wacom_wac *wacom_wac, size_t len)
 	case INTUOS5L:
 	case INTUOSPS:
 	case INTUOSPM:
+	case INTUOSP2MP:
 	case INTUOSPL:
 		if (len == WACOM_PKGLEN_BBTOUCH3)
 			sync = wacom_bpt3_touch(wacom_wac);
 		else if (wacom_wac->data[0] == WACOM_REPORT_USB)
 			sync = wacom_status_irq(wacom_wac, len);
+		else if(wacom_wac->data[0] == WACOM_REPORT_IP2_STATUS)
+			sync = wacom_status_ip2_irq(wacom_wac, len);
+		else if(wacom_wac->data[0] == WACOM_REPORT_IP2_TOUCH)
+			sync = wacom_ip2_touch(wacom_wac);
 		else
 			sync = wacom_intuos_irq(wacom_wac);
 		break;
@@ -2807,6 +2942,14 @@ void wacom_setup_device_quirks(struct wacom *wacom)
 	 * so rewrite this one to be of type WACOM_DEVICETYPE_TOUCH.
 	 */
 	if (features->type == BAMBOO_PAD)
+		features->device_type = WACOM_DEVICETYPE_TOUCH;
+
+    /*
+	 * New Intuos Pro tablets send touch data from their second endpoint
+	 * which has little useful info in the HID descriptor. So we need to
+	 * manually set its device_type to WACOM_DEVICETYPE_TOUCH.
+	 */
+	if(features->type == INTUOSP2MP)
 		features->device_type = WACOM_DEVICETYPE_TOUCH;
 
 	if (features->type == REMOTE)
@@ -3072,6 +3215,7 @@ int wacom_setup_touch_input_capabilities(struct input_dev *input_dev,
 	case INTUOS5:
 	case INTUOS5L:
 	case INTUOSPM:
+	case INTUOSP2MP:
 	case INTUOSPL:
 	case INTUOS5S:
 	case INTUOSPS:
@@ -3269,6 +3413,7 @@ int wacom_setup_pad_input_capabilities(struct input_dev *input_dev,
 	case INTUOS5:
 	case INTUOS5L:
 	case INTUOSPM:
+	case INTUOSP2MP:
 	case INTUOSPL:
 	case INTUOS5S:
 	case INTUOSPS:
@@ -3830,6 +3975,9 @@ static const struct wacom_features wacom_features_0x343 =
 	  DTUS, WACOM_INTUOS_RES, WACOM_INTUOS_RES, 4,
 	  WACOM_DTU_OFFSET, WACOM_DTU_OFFSET,
 	  WACOM_DTU_OFFSET, WACOM_DTU_OFFSET };
+static const struct wacom_features wacom_features_0x357 =
+	{ "Wacom Intuos Pro 2 M Paper", 44800, 29600, 8191, 63,
+	  INTUOSP2MP, WACOM_INTUOS3_RES, WACOM_INTUOS3_RES, 0 };
 
 static const struct wacom_features wacom_features_HID_ANY_ID =
 	{ "Wacom HID", .type = HID_GENERIC, .oVid = HID_ANY_ID, .oPid = HID_ANY_ID };
@@ -3996,6 +4144,7 @@ const struct hid_device_id wacom_ids[] = {
 	{ USB_DEVICE_WACOM(0x33D) },
 	{ USB_DEVICE_WACOM(0x33E) },
 	{ USB_DEVICE_WACOM(0x343) },
+	{ USB_DEVICE_WACOM(0x357) },
 	{ USB_DEVICE_WACOM(0x4001) },
 	{ USB_DEVICE_WACOM(0x4004) },
 	{ USB_DEVICE_WACOM(0x5000) },

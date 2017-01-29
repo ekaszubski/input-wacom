@@ -125,6 +125,7 @@ static void wacom_feature_mapping(struct hid_device *hdev,
 	int n;
 
 	switch (usage->hid) {
+	case WACOM_HID_DG_CONTACTMAX:
 	case HID_DG_CONTACTMAX:
 		/* leave touch_max as is if predefined */
 		if (!features->touch_max) {
@@ -1881,6 +1882,18 @@ static int wacom_parse_and_register(struct wacom *wacom, bool wireless)
 			   (features->pktlen != WACOM_PKGLEN_BPAD_TOUCH_USB)) {
 			error = -ENODEV;
 			goto fail_shared_data;
+		}
+	}
+
+	/*
+	 * Intuos Pro 2 has generic hid handling for Pen, ExpressKeys, TouchRing
+	 * Use pkglen to identify the right interface (0x81) and use HID_GENERIC
+	 */
+	if(features->type == INTUOSP2MP)
+	{
+		if(features->pktlen == WACOM_PKGLEN_IP2_USB)
+		{
+			features->type = HID_GENERIC;
 		}
 	}
 
