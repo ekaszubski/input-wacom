@@ -299,22 +299,6 @@ static int wacomfs_unlink(struct inode * inode, struct dentry * entry)
     return 0;
 }
 
-static void wacomfs_destroy_file(struct inode * inode)
-{
-    pr_info("destroy called\n");
-}
-
-static int wacomfs_drop_file(struct inode * inode)
-{
-    pr_info("drop called\n");
-    return 1;
-}
-
-//static void wacomfs_put_file(struct inode * inode)
-//{
-//    pr_info("put called\n");
-//}
-
 static struct inode_operations wacomfs_inode_ops =
 {
     .lookup = simple_lookup,
@@ -324,11 +308,7 @@ static struct inode_operations wacomfs_inode_ops =
 static struct super_operations wacomfs_super_ops =
 {
     .statfs = simple_statfs,
-//    .drop_inode = wacomfs_drop_file,
     .drop_inode = generic_delete_inode,
-//    .destroy_inode = wacomfs_destroy_file,
-//    .delete_inode = wacomfs_delete_file,
-//    .put_inode = wacomfs_put_file,
 };
 
 static int wacomfs_fill_sb(struct super_block * superblock, void * data, int silent)
