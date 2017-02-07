@@ -274,6 +274,9 @@ static int wacomfs_unlink(struct inode * inode, struct dentry * entry)
     //struct super_block * superblock = entry->d_sb;
     pr_info("unlink called\n");
 
+    // only allowed to delete the oldest file, which will be the only one with non-zero size
+    if(entry->d_inode->i_size == 0) return -EPERM;
+
     // execute delete call to tablet
     if(IS_ERR((result = wacom_smartpad_del_file(__wacom_dev)))) return PTR_ERR(result);
 
