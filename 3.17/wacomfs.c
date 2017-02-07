@@ -220,7 +220,8 @@ error:
 static int wacomfs_query_files(struct super_block * superblock)
 {
     struct dentry * root = superblock->s_root;
-    struct dentry * oldest_file = NULL;
+    struct dentry * prev_file = NULL;
+    struct dentry * curr_file = NULL;
     size_t i;
     // drawing|00001|\0
     char filename[7+5+1];
@@ -232,28 +233,34 @@ static int wacomfs_query_files(struct super_block * superblock)
 
     //struct dentry * prev_file = NULL;
 
-    if(!IS_ERR_OR_NULL((num_files_header = wacom_smartpad_get_num_files(__wacom_dev))) && (num_files = read_ushort_le(&num_files_header->num_files.raw)) > 1)
+    if(IS_ERR_OR_NULL((num_files_header = wacom_smartpad_get_num_files(__wacom_dev)))) return PTR_ERR(num_files_header);
+
+    if((num_files = read_ushort_le(&num_files_header->num_files.raw)) > 0)
     {
         for(i = 0; i < num_files; ++i)
         {
             snprintf(filename, sizeof(filename), "drawing%lu", i + 1);
-            // first file is the special downloadable file
-            if(i == 0)
+            // last file is the special downloadable file
+            if(i == num_files - 1)
             {
-                if(!IS_ERR_OR_NULL((oldest_file_listing = wacom_smartpad_get_file_info(__wacom_dev))))
-                {
-                    oldest_file = wacomfs_create_file(superblock, root, "drawing_oldest", 0444);
-                    oldest_file->d_inode->i_size = read_uint_le(&oldest_file_listing->file_size.raw);
-                }
-                else return PTR_ERR(oldest_file_listing);
+                if(IS_ERR_OR_NULL((oldest_file_listing = wacom_smartpad_get_file_info(__wacom_dev)))) return PTR_ERR(oldest_file_listing);
+                if(IS_ERR_OR_NULL((curr_file = wacomfs_create_file(superblock, root, filename, 0444)))) return PTR_ERR(curr_file);
+
+                curr_file->d_inode->i_size = read_uint_le(&oldest_file_listing->file_size.raw);
             }
             // other files are just there to indicate number of drawings on tablet
             // and cannot be read or modified
-            else wacomfs_create_file(superblock, root, filename, 0000);
+            else
+            {
+                if(IS_ERR_OR_NULL((curr_file = wacomfs_create_file(superblock, root, filename, 0000)))) return PTR_ERR(curr_file);
+            }
+
+            curr_file->d_inode->i_private = prev_file;
+            prev_file = curr_file;
+
             pr_info("created file %s\n", filename);
         }
     }
-    else return PTR_ERR(num_files_header);
 
     return 0;
 }
@@ -261,18 +268,31 @@ static int wacomfs_query_files(struct super_block * superblock)
 static int wacomfs_unlink(struct inode * inode, struct dentry * entry)
 {
     IP2InfoHeader * result;
+    struct dentry * prev_file = entry->d_inode->i_private;
+    IP2InfoListingHeader * oldest_file_listing = NULL;
+
     //struct super_block * superblock = entry->d_sb;
     pr_info("unlink called\n");
 
     // execute delete call to tablet
     if(IS_ERR((result = wacom_smartpad_del_file(__wacom_dev)))) return PTR_ERR(result);
+
     // deallocate last drawing file
     wacomfs_free_last_drawing_file();
+
     // remove corresponding dentry
     dput(entry);
-    //d_genocide(superblock->s_root);
-    // re-query tablet for files
-    //return wacomfs_query_files(superblock);
+
+    // check whether there's another file to update
+    if(IS_ERR_OR_NULL(prev_file)) return PTR_ERR(prev_file);
+
+    // re-query tablet for oldest file info
+    if(IS_ERR((oldest_file_listing = wacom_smartpad_get_file_info(__wacom_dev)))) return PTR_ERR(oldest_file_listing);
+
+    // update the next file's size and permissions
+    prev_file->d_inode->i_size = read_uint_le(&oldest_file_listing->file_size.raw);
+    prev_file->d_inode->i_mode |= 0444;
+
     return 0;
 }
 
