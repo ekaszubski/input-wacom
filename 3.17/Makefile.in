@@ -8,8 +8,10 @@ ifneq ($(CONFIG_HID_WACOM),y)
 WCM_VERSION := $(shell cd $(KBUILD_EXTMOD)/.. && ./git-version-gen)
 ccflags-y := -DWACOM_VERSION_SUFFIX=\"-$(WCM_VERSION)\" -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers $(EXTRA_CFLAGS)
 wacom-objs := wacom_wac.o wacom_sys.o
+wacom_fs-objs := wacomfs.o wacom_smartpad.o wacom_smartpad_util.o
 obj-m += wacom.o
 obj-m += wacom_w8001.o
+obj-m += wacom_fs.o
 else
 $(error You requested to build wacom with configure, but wacom is configured as built-in in your kernel config)
 endif # CONFIG_HID_WACOM
