@@ -217,7 +217,7 @@ error:
     return NULL;
 }
 
-static int wacomfs_query_files(struct super_block * superblock)
+static int wacomfs_create_listing(struct super_block * superblock)
 {
     struct dentry * root = superblock->s_root;
     struct dentry * prev_file = NULL;
@@ -348,7 +348,7 @@ static int wacomfs_fill_sb(struct super_block * superblock, void * data, int sil
 
     if(!(superblock->s_root = d_make_root(root))) return -ENOMEM;
 
-    return wacomfs_query_files(superblock);
+    return wacomfs_create_listing(superblock);
 }
 
 static struct dentry * wacomfs_mount(struct file_system_type * type, int flags, char const * dev, void * data)
