@@ -45,10 +45,12 @@ static struct inode * wacomfs_make_inode(struct super_block * superblock, int mo
     struct inode * result = new_inode(superblock);
     if(result)
     {
+        result->i_ino = ((struct wacomfs_sb_info*)superblock->s_fs_info)->num_files++;
         result->i_mode = mode;
         result->i_uid.val = result->i_gid.val = 0;
         result->i_blocks = 0;
         result->i_atime = result->i_mtime = result->i_ctime = CURRENT_TIME;
+        pr_info("wacomfs: make_inode: ino %lu\n", result->i_ino);
     }
     return result;
 }
@@ -130,36 +132,9 @@ static ssize_t wacomfs_read_file(struct file * file, char * buf, size_t count, l
     return info_bytes_copied + block_bytes_copied;
 }
 
-//static int wacomfs_open_file(struct inode * inode, struct file * file)
-//{
-//    pr_info("open called\n");
-////    file->private_data = inode->i_private;
-//    return 0;
-//}
-
-//static ssize_t wacomfs_write_file(struct file * file, char const * buf, size_t count, loff_t * offset)
-//{
-//    pr_info("write called %lu %lli\n", count, *offset);
-//    return 0;
-//}
-
-//static int wacomfs_delete_file(struct dentry const * entry)
-//{
-//    pr_info("delete called\n");
-//
-//    return 1;
-//}
-
-//static struct dentry_operations wacomfs_dentry_ops =
-//{
-//    .d_delete = wacomfs_delete_file,
-//};
-
 static struct file_operations wacomfs_file_ops =
 {
-//    .open = wacomfs_open_file,
     .read = wacomfs_read_file,
-//    .write = wacomfs_write_file
 };
 
 static struct dentry * wacomfs_create_file(struct super_block * superblock, struct dentry * dir, char const * name, short mode)
@@ -172,15 +147,12 @@ static struct dentry * wacomfs_create_file(struct super_block * superblock, stru
     qname.len = strlen(name);
     qname.hash = full_name_hash(name, qname.len);
 
+    pr_info("wacomfs: create_file: name %s\n", name);
+
     if(!(entry = d_alloc(dir, &qname))) goto error;
     if(!(inode = wacomfs_make_inode(superblock, S_IFREG | mode))) goto error;
 
-    //inode->i_op = &wacomfs_inode_ops;
-    //inode->i_op = &simple_dir_inode_operations;
     inode->i_fop = &wacomfs_file_ops;
-//    inode->i_private = downloadable ? 0x01 : PTR_ERR(-EPERM);
-
-//    d_set_d_op(entry, &wacomfs_dentry_ops);
 
     d_add(entry, inode);
     return entry;
@@ -190,48 +162,213 @@ error:
     return NULL;
 }
 
-static struct dentry * wacomfs_create_dir(struct super_block * superblock, struct dentry * parent, char const * name)
+// query the tablet, update the size of drawing1
+static int wacomfs_update_meta(struct super_block * superblock)
 {
-    struct dentry * entry = NULL;
-    struct inode * inode = NULL;
-    struct qstr qname;
-
-    qname.name = name;
-    qname.len = strlen(name);
-    qname.hash = full_name_hash(name, qname.len);
-
-    if(!(entry = d_alloc(parent, &qname))) goto error;
-    if(!(inode = wacomfs_make_inode(superblock, S_IFDIR | 0755))) goto error;
-
-    //inode->i_op = &wacomfs_inode_ops;
-    inode->i_op = &simple_dir_inode_operations;
-    inode->i_fop = &simple_dir_operations;
-
-//    d_set_d_op(entry, &wacomfs_dentry_ops);
-
-    d_add(entry, inode);
-    return entry;
-
-error:
-    if(entry) dput(entry);
-    return NULL;
-}
-
-static int wacomfs_create_listing(struct super_block * superblock)
-{
-    struct dentry * root = superblock->s_root;
-    struct dentry * prev_file = NULL;
-    struct dentry * curr_file = NULL;
-    size_t i;
-    // drawing|00001|\0
-    char filename[7+5+1];
-
-    IP2NumFilesHeader * num_files_header = NULL;
+    struct dentry * entry = ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawing1;
+    struct inode * file_inode = entry ? entry->d_inode : NULL;
     IP2InfoListingHeader * oldest_file_listing = NULL;
 
-    unsigned short num_files = 0;
+    // nothing to update
+    if(!file_inode) return 0;
 
-    //struct dentry * prev_file = NULL;
+    // query tablet for oldest file info
+    if(IS_ERR((oldest_file_listing = wacom_smartpad_get_file_info(__wacom_dev)))) return PTR_ERR(oldest_file_listing);
+
+    // update the next file's size (perms should have been set at creation)
+    file_inode->i_size = read_uint_le(&oldest_file_listing->file_size.raw);
+
+    pr_info("wacomfs: update_meta: size %lli\n", file_inode->i_size);
+
+    return 0;
+}
+
+static int wacomfs_add_file(struct super_block * superblock)
+{
+    struct dentry * root = superblock->s_root;
+    // drawing|00001|\0
+    char filename[7+5+1];
+    struct dentry * curr_file = NULL;
+
+    int result;
+    // num_files is really num inodes so first drawing will have idx 1 since fs root will have idx 0
+    size_t drawing_idx = ((struct wacomfs_sb_info*)superblock->s_fs_info)->num_files;
+
+    snprintf(filename, sizeof(filename), "drawing%lu", drawing_idx);
+    // first file is the special downloadable file
+    if(drawing_idx == 1)
+    {
+        // create the file
+        if(IS_ERR_OR_NULL((curr_file = wacomfs_create_file(superblock, root, filename, 0444)))) return PTR_ERR(curr_file);
+        // record the file in the superblock
+        ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawing1 = ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawingN = curr_file;
+        // query size info from tablet
+        if(IS_ERR_VALUE((result = wacomfs_update_meta(superblock)))) return result;
+    }
+    // other files are just there to indicate number of drawings on tablet
+    // and cannot be read or modified
+    else
+    {
+        // create the file
+        if(IS_ERR_OR_NULL((curr_file = wacomfs_create_file(superblock, root, filename, 0000)))) return PTR_ERR(curr_file);
+        // new files are going to point back to the previous file to make it easier for us to handle dir listing
+        curr_file->d_inode->i_private = ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawingN;
+        // record the file in the superblock
+        ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawingN = curr_file;
+    }
+
+    pr_info("added file %s\n", filename);
+
+    return 0;
+}
+
+// delete file; this will actually delete drawingN
+static int wacomfs_delete_file(struct super_block * superblock)
+{
+    struct dentry * entry = ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawingN;
+    struct inode * file_inode = entry->d_inode;
+    struct dentry * prev_file = file_inode->i_private;
+//    struct dentry * drawing1_copy = NULL;
+
+    pr_info("wacomfs: delete_file: name %s\n", entry->d_name.name);
+
+    // remove corresponding dentry
+    //dput(entry);
+    inode_dec_link_count(file_inode);
+    // decrement global ino
+    --((struct wacomfs_sb_info*)superblock->s_fs_info)->num_files;
+
+    pr_info("wacomfs: delete_file: new global ino %lu\n", ((struct wacomfs_sb_info*)superblock->s_fs_info)->num_files);
+
+    // if this file links to a previous file, then update drawingN
+    if(prev_file)
+    {
+        pr_info("wacomfs: delete_file: updating drawingN with prev_file\n");
+        ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawingN = prev_file;
+
+//        drawing1_copy = kzalloc(sizeof(struct dentry), GFP_KERNEL);
+//        memcpy(drawing1_copy, ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawing1, sizeof(struct dentry));
+//        d_add(drawing1_copy, ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawing1->d_inode);
+    }
+    // otherwise we just deleted drawingN, so set everything to null
+    else
+    {
+        pr_info("wacomfs: delete_file: no prev_file\n");
+        ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawing1 = ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawingN = NULL;
+    }
+
+    return 0;
+}
+
+// each time this is called, query the tablet for the number of drawings
+// drawing1, the special readable drawing, will always be ino number 2
+// the others will just be 2+i
+static int wacomfs_list(struct file * file, struct dir_context * ctx)
+{
+    // file is the directory we're trying to list
+    // since wacomfs is a flat structure, this can only ever be the root dir
+    // so all we need to do is give a name and ino for each drawing
+
+    // query the tablet for the number of drawings
+    // if the number is different than what we remember, then look at whether we need to add or delete
+    // - if add, then just add the new file
+    // - if delete, then we need to update the special readable drawing
+    // either way, we need to iterate through all the drawings and enter their names + inode numbers here
+
+    size_t i;
+    short new_num_files = 0;
+    IP2NumFilesHeader * num_files_header = NULL;
+
+    struct inode * file_inode = file->f_inode;
+    struct super_block * superblock = file_inode->i_sb;
+    struct dentry * curr_file = NULL;
+
+    pr_info("wacomfs: list\n");
+
+    if(IS_ERR_OR_NULL((num_files_header = wacom_smartpad_get_num_files(__wacom_dev)))) return PTR_ERR(num_files_header);
+
+    if((new_num_files = 1 + read_ushort_le(&num_files_header->num_files.raw)) != ((struct wacomfs_sb_info*)superblock->s_fs_info)->num_files)
+    {
+        // add
+        for(i = ((struct wacomfs_sb_info*)superblock->s_fs_info)->num_files; i < new_num_files; ++i)
+        {
+            wacomfs_add_file(superblock);
+        }
+
+        // delete and update
+        // this should basically never happen since we are the ones controlling when files get deleted
+        if(new_num_files < ((struct wacomfs_sb_info*)superblock->s_fs_info)->num_files)
+        {
+            wacomfs_delete_file(superblock);
+            wacomfs_update_meta(superblock);
+        }
+    }
+
+    pr_info("wacomfs: list: incoming pos %lli\n", ctx->pos);
+    if(ctx->pos > new_num_files) return 0;
+
+    curr_file = ((struct wacomfs_sb_info*)superblock->s_fs_info)->drawingN;
+
+    // we need to get the name of each drawing file along with its inode number
+    // in this case we're going to walk backwards from drawingN to drawing1
+    for(i = ((struct wacomfs_sb_info*)superblock->s_fs_info)->num_files; i > 1; --i)
+    {
+        if(!curr_file) break;
+
+        pr_info("wacomfs: list: emit %s\n", curr_file->d_name.name);
+
+        if(!dir_emit(ctx, curr_file->d_name.name, curr_file->d_name.len, d_inode(curr_file)->i_ino, dt_type(d_inode(curr_file)))) return -ENOSPC;
+        ++ctx->pos;
+
+        curr_file = curr_file->d_inode->i_private;
+    }
+
+    return 0;
+}
+
+// just add dots and forward the rest of the work to wacomfs_list
+static int wacomfs_iterate(struct file * file, struct dir_context * ctx)
+{
+    pr_info("wacomfs: iterate\n");
+    if(!dir_emit_dots(file, ctx))
+    {
+        return -ENOSPC;
+    }
+    return wacomfs_list(file, ctx);
+}
+
+static struct file_operations wacomfs_file_dops =
+{
+    .open = dcache_dir_open,
+    .release = dcache_dir_close,
+    .llseek = dcache_dir_lseek,
+    .read = generic_read_dir,
+    .iterate = wacomfs_iterate,
+    .fsync = noop_fsync
+};
+
+// if the newest drawing is drawing1
+// - each time we add a new drawing, we need to modify drawingN
+//   - reset perms on drawingN
+//   - create new drawingN+1
+// - each time we delete a drawing, we need to modify drawingN-1
+//   - expand perms on drawing N-1
+//   - delete drawingN
+// if the oldest drawing is drawing1
+// - each time we add a new drawing, we don't need to modify any files
+//   - just add drawingN
+// - each time we delete a drawing, we need to modify drawing1
+//   - update size on drawing1
+//   - delete drawingN
+// best option seems to be oldest drawing -> drawing1
+static int wacomfs_create_listing(struct super_block * superblock)
+{
+    size_t i;
+
+    IP2NumFilesHeader * num_files_header = NULL;
+
+    unsigned short num_files = 0;
+    pr_info("wacomfs: create_listing\n");
 
     if(IS_ERR_OR_NULL((num_files_header = wacom_smartpad_get_num_files(__wacom_dev)))) return PTR_ERR(num_files_header);
 
@@ -239,26 +376,7 @@ static int wacomfs_create_listing(struct super_block * superblock)
     {
         for(i = 0; i < num_files; ++i)
         {
-            snprintf(filename, sizeof(filename), "drawing%lu", i + 1);
-            // last file is the special downloadable file
-            if(i == num_files - 1)
-            {
-                if(IS_ERR_OR_NULL((oldest_file_listing = wacom_smartpad_get_file_info(__wacom_dev)))) return PTR_ERR(oldest_file_listing);
-                if(IS_ERR_OR_NULL((curr_file = wacomfs_create_file(superblock, root, filename, 0444)))) return PTR_ERR(curr_file);
-
-                curr_file->d_inode->i_size = read_uint_le(&oldest_file_listing->file_size.raw);
-            }
-            // other files are just there to indicate number of drawings on tablet
-            // and cannot be read or modified
-            else
-            {
-                if(IS_ERR_OR_NULL((curr_file = wacomfs_create_file(superblock, root, filename, 0000)))) return PTR_ERR(curr_file);
-            }
-
-            curr_file->d_inode->i_private = prev_file;
-            prev_file = curr_file;
-
-            pr_info("created file %s\n", filename);
+            wacomfs_add_file(superblock);
         }
     }
 
@@ -267,11 +385,9 @@ static int wacomfs_create_listing(struct super_block * superblock)
 
 static int wacomfs_unlink(struct inode * inode, struct dentry * entry)
 {
-    IP2InfoHeader * result;
-    struct dentry * prev_file = entry->d_inode->i_private;
-    IP2InfoListingHeader * oldest_file_listing = NULL;
+    IP2InfoHeader * result = NULL;
 
-    //struct super_block * superblock = entry->d_sb;
+    struct super_block * superblock = entry->d_sb;
     pr_info("unlink called\n");
 
     // only allowed to delete the oldest file, which will be the only one with non-zero size
@@ -283,20 +399,21 @@ static int wacomfs_unlink(struct inode * inode, struct dentry * entry)
     // deallocate last drawing file
     wacomfs_free_last_drawing_file();
 
-    // remove corresponding dentry
-    dput(entry);
+    // remove the file from the filesystem
+    if(IS_ERR((result = ERR_PTR(wacomfs_delete_file(superblock)))))
+    {
+        pr_info("wacomfs: unlink: delete_file err\n");
+        return PTR_ERR(result);
+    }
+    // update the new special drawing file
+    if(IS_ERR((result = ERR_PTR(wacomfs_update_meta(superblock)))))
+    {
+        pr_info("wacomfs: unlink: update_meta err\n");
+        return PTR_ERR(result);
+    }
 
-    // check whether there's another file to update
-    if(IS_ERR_OR_NULL(prev_file)) return PTR_ERR(prev_file);
-
-    // re-query tablet for oldest file info
-    if(IS_ERR((oldest_file_listing = wacom_smartpad_get_file_info(__wacom_dev)))) return PTR_ERR(oldest_file_listing);
-
-    // update the next file's size and permissions
-    prev_file->d_inode->i_size = read_uint_le(&oldest_file_listing->file_size.raw);
-    prev_file->d_inode->i_mode |= 0444;
-
-    return 0;
+    // only say we deleted the file when we delete the special file
+    return ((struct wacomfs_sb_info*)superblock->s_fs_info)->num_files == 1;
 }
 
 static struct inode_operations wacomfs_inode_ops =
@@ -315,16 +432,19 @@ static int wacomfs_fill_sb(struct super_block * superblock, void * data, int sil
 {
     struct inode * root;
 
+    pr_info("wacomfs: fill_sb\n");
+
     superblock->s_blocksize = PAGE_CACHE_SIZE;
     superblock->s_blocksize_bits = PAGE_CACHE_SHIFT;
     superblock->s_magic = WACOMFS_MAGIC;
     superblock->s_op = &wacomfs_super_ops;
+    superblock->s_fs_info = kzalloc(sizeof(struct wacomfs_sb_info), GFP_KERNEL);
 
     if(!(root = wacomfs_make_inode(superblock, S_IFDIR | 0755))) return -ENOMEM;
 
     //root->i_op = &simple_dir_inode_operations;
     root->i_op = &wacomfs_inode_ops;
-    root->i_fop = &simple_dir_operations;
+    root->i_fop = &wacomfs_file_dops;
 
     if(!(superblock->s_root = d_make_root(root))) return -ENOMEM;
 
@@ -345,6 +465,8 @@ static void wacomfs_unmount(struct super_block * superblock)
 {
     // deallocate last drawing file
     wacomfs_free_last_drawing_file();
+    // deallocate superblock info
+    kfree(superblock->s_fs_info);
     // deallocate all inodes
     kill_litter_super(superblock);
     pr_info("wacomfs entry removed\n");

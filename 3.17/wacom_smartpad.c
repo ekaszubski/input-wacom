@@ -81,6 +81,8 @@ static unsigned char get_buffer_idx(size_t shifts, size_t idx)
     return buffer_idxs[idx_offset];
 }
 
+// reader : reader for compressed data
+// block : mem block to decompress to
 static MemBlock wacom_smartpad_decompress(MemBlockReader reader, MemBlock block)
 {
     MemBlockWriter writer =
